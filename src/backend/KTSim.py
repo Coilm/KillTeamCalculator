@@ -70,6 +70,7 @@ class Simulation:
 
     def attack(self, simstep=1):
         atk_rolls = generate_dice(simstep, self.attacker.atk)
+        reroll_mask = np.zeros_like(atk_rolls, dtype=bool)
 
         success = np.zeros(np.shape(atk_rolls)[0], dtype=int)
         crit = np.zeros(np.shape(atk_rolls)[0], dtype=int)
@@ -81,11 +82,20 @@ class Simulation:
                 atk_rolls = atk_rolls[:, :-1]
                 break
 
-        # Check for reroll keyword
-        # TODO: Implement the reroll mechanic to do the whole set of rolls instead of just one
-        # for keyword in self.keywords:
-        #    if keyword in ['Bal', 'Ceaseless', 'Relentless']:
-        #        atk_rolls = self.reroll(atk_rolls, keyword)
+        for keyword in self.attacker.keywords:
+            if keyword == 'Relentless':
+                atk_rolls, reroll_mask = relentless(atk_rolls, self.attacker.hit, reroll_mask)
+                break # All the rolls that needed to be rerolled have been rerolled already
+            if keyword == 'Ceaseless': 
+                # Start with Cealess before balanced so balanced does not reroll a common value 
+                # that could be rerolled with ceaseless
+                atk_rolls, reroll_mask = ceaseless(atk_rolls, self.attacker.hit, reroll_mask)
+            if keyword == 'Bal': 
+                # Balanced can still be usefull after Ceaseless, for example the roll [1,1,2,6], the ones will be rerolled
+                # with ceaseless, but the 2 will be rerolled with balanced
+                atk_rolls, reroll_mask = balanced(atk_rolls, self.attacker.hit, reroll_mask)
+
+
 
         # Check for lethal
         crit += np.sum(atk_rolls >= self.attacker.lethal, axis=1)
@@ -264,3 +274,81 @@ class Simulation:
                 print(f"{atk}*{self.attacker.dmg} + {atk_c}*{self.attacker.critdmg} + (MW: {mw}) = {d}")
 
         return damages
+
+
+def relentless(rolls, threshold=3, reroll_mask=None):
+    """
+    Rerolls all dice below a certain threshold, except those that have already been rerolled.
+    """
+    if reroll_mask is None:
+        reroll_mask = np.zeros_like(rolls, dtype=bool)
+
+    mask = (rolls < threshold) & ~reroll_mask  # Only reroll if not already rerolled
+
+    new_rolls = np.random.randint(1, 7, size=mask.sum())  # Generate necessary values
+    rerolled_rolls = rolls.copy()
+    rerolled_rolls[mask] = new_rolls
+
+    reroll_mask = reroll_mask | mask  # Update reroll mask
+
+    return rerolled_rolls, reroll_mask
+
+
+def balanced(rolls, threshold=3, reroll_mask=None):
+    """
+    Rerolls one random dice per row if at least one dice is below the threshold,
+    except for dice that have already been rerolled.
+    """
+    if reroll_mask is None:
+        reroll_mask = np.zeros_like(rolls, dtype=bool)
+    mask = (rolls < threshold) & ~reroll_mask
+    rows_with_low_values = np.any(mask, axis=1)
+
+    col_indices = np.array([
+        np.random.choice(np.where(mask[i])[0]) if rows_with_low_values[i] else -1
+        for i in range(rolls.shape[0])
+    ])
+
+    valid_rows = col_indices != -1
+    new_values = np.random.randint(1, 7, size=valid_rows.sum())
+
+    rerolled_rolls = rolls.copy()
+    rerolled_rolls[np.arange(rolls.shape[0])[valid_rows], col_indices[valid_rows]] = new_values
+
+    reroll_mask[np.arange(rolls.shape[0])[valid_rows], col_indices[valid_rows]] = True  # Update reroll mask
+
+    return rerolled_rolls, reroll_mask
+
+
+def ceaseless(rolls, threshold=3, reroll_mask=None):
+    """
+    Rerolls all occurrences of the most common value in each row that is below the threshold,
+    except for dice that have already been rerolled.
+    """
+    if reroll_mask is None:
+        reroll_mask = np.zeros_like(rolls, dtype=bool)
+
+    mask = (rolls < threshold) & ~reroll_mask
+    rows_with_low_values = np.any(mask, axis=1)
+
+    low_values = np.where(mask, rolls, np.nan)
+
+    counts = np.apply_along_axis(
+        lambda row: np.bincount(row[~np.isnan(row)].astype(int), minlength=7),
+        axis=1, arr=low_values
+    )
+
+    most_common_values = np.argmax(counts[:, 1:], axis=1) + 1
+
+    reroll_mask_update = rolls == most_common_values[:, None]
+    reroll_mask_update &= rows_with_low_values[:, None]
+    reroll_mask_update &= ~reroll_mask  # Ensure we don’t reroll dice that were already changed
+
+    new_values = np.random.randint(1, 7, size=reroll_mask_update.sum())
+
+    rerolled_rolls = rolls.copy()
+    rerolled_rolls[reroll_mask_update] = new_values
+
+    reroll_mask |= reroll_mask_update  # Update reroll mask
+
+    return rerolled_rolls, reroll_mask
